@@ -1,0 +1,236 @@
+import os
+import glob
+import numpy as np
+import cv2
+import time
+import random
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.neighbors import KNeighborsClassifier
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Conv2D, MaxPooling2D
+from tensorflow.keras.layers import Flatten
+from tensorflow.keras.optimizers import SGD
+from tensorflow.keras.layers import Dropout
+from tensorflow.keras.layers import Activation
+from tensorflow.keras import losses
+from tensorflow.keras.layers import BatchNormalization
+from tensorflow.keras.layers import LeakyReLU
+from keras import regularizers
+import keras
+import tensorflow as tf
+from tensorflow.python.framework import ops
+ops.reset_default_graph()
+import warnings
+warnings.filterwarnings('ignore')
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+def transition_matrix(arr, n=1):
+    """"
+    Computes the transition matrix from Markov chain sequence of order `n`.
+
+    :param arr: Discrete Markov chain state sequence in discrete time with states in 0, ..., N
+    :param n: Transition order
+    """
+
+    M = np.zeros(shape=(max(arr) + 1, max(arr) + 1))
+    for (i, j) in zip(arr, arr[1:]):
+        M[i, j] += 1
+    #print(M.sum())
+    M_sum = np.ma.masked_equal(M.sum(axis=1), 0)
+    T = (M.T / M_sum).T
+
+    return np.linalg.matrix_power(T, n)
+
+
+def num_img_fams_list():
+  #inp_dir = 'D:\Malware Paper\malimg_dataset\malimg_paper_dataset_imgs'
+  inp_dir = 'D:\Malware Paper\Malware\Microsoft_Image_Dataset'
+  os.chdir(inp_dir)  #the parent fold with sub-folders
+  list_fams = os.listdir(os.getcwd()) #vector of strings with family names
+  no_imgs = [] # No. of samples per family
+
+  for family in range(len(list_fams)):
+     os.chdir(list_fams[family])
+     no_per_family = len(glob.glob('*.png'))
+     no_imgs.append(no_per_family)
+     os.chdir('..')
+  return no_imgs, list_fams
+
+
+def getlabels(no_imgs, total):
+    y = np.zeros(total) #label vector
+    temp1 = np.zeros(len(no_imgs)+1)
+    temp1[1:len(temp1)] = no_imgs #transform list to ndarray
+    temp2 = int(temp1[0]) #used to be as lower bound, initially 0
+
+    for label in range(len(no_imgs)):
+       temp3 = temp2 + int(temp1[label+1]) #No. of imgs assigned labels from 2 round
+       #print("temp3", temp3)
+       print("label", label)
+       for index in range(temp2, temp3):# assigned labels to a fam of malware
+            y[index] = label
+       temp2 = temp2 + int(temp1[label + 1])
+    #print(y[100:200])
+    return np.array(y)
+
+
+def getX(list_fams, total):
+   trans_mat_arr = list() #pixel ranges between 0 and 255, in total 256
+   total_time = 0
+   min_time = 10
+   for i in range(len(list_fams)):
+      os.chdir(list_fams[i])
+      img_list = glob.glob('*.png')# Getting only 'png' files in a folder
+      for j in range(len(img_list)):
+         img = cv2.imread(img_list[j], 0)
+       # create a CLAHE object (Arguments are optional).
+        #  clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+         tic = time.perf_counter()
+        #  cl1 = clahe.apply(img)
+         cl1 =  cv2.equalizeHist(img)
+         cl1 = cv2.resize(cl1, (64,64), interpolation = cv2.INTER_AREA)
+         toc = time.perf_counter()
+         fir_step_time = toc - tic
+         total_time = total_time + fir_step_time
+         if fir_step_time < min_time:
+             min_time = fir_step_time
+         trans_mat_arr.append(cl1)
+         #print(f"the period of calling transition_matrix function in {fir_step_time:0.4f} seconds")
+      os.chdir('..')
+   print(f"the average time per image {total_time / total:0.8f} seconds")
+   print(f"the fewest time taken for an image {min_time:0.8f} seconds")
+   return np.array(trans_mat_arr)
+
+
+def strtifiedkfolddata(X, y, total, kfold):
+
+    #p = np.arange(total)# an index array, 0:n_samples
+    #random.seed(random.random())
+    #random.shuffle(p)# the index array is now shuffled
+    #X_shuffle, y_shuffle = X[p], y[p]# both the arrays are now shuffled
+    skf = StratifiedKFold(kfold)
+    #print("skf.get_n_splits", skf.get_n_splits(X, y))
+    skfind = [None]*skf.get_n_splits(X, y)# indices
+    cnt = 0
+    for train_index in skf.split(X, y):
+       skfind[cnt] = train_index
+       cnt = cnt + 1
+    #print("train_shuffle", skfind[0][0][100:200])
+    #print("test_shuffle", skfind[0][1][100:200])
+    #print("y_train_shuffle", y[skfind[0][0][100:200]])
+    #print("y_shuffle", y[skfind[0][1][100:200]])
+    return skfind
+
+
+def model_cnn(no_imgs):
+    model = Sequential()
+    model.add(Conv2D(64, (2, 2),
+                     padding='same',  # 137, 115(15755)
+                     input_shape=(64, 64, 1), activation='relu', kernel_regularizer=regularizers.l2(0.001)))  # 256,256,256
+    model.add(MaxPooling2D(pool_size=(2, 2), padding='same'))  # 128,128,256
+    model.add(Conv2D(128, (2, 2), padding='same', activation='relu', kernel_regularizer=regularizers.l2(0.001)))  # shape(128,128, 128
+    model.add(MaxPooling2D(pool_size=(2, 2), padding='same'))  # shape(64, 64, 128)
+    model.add(Conv2D(256, (2, 2), padding='same',activation='relu',kernel_regularizer=regularizers.l2(0.001)))  # shape(batch_size, 64, 64, 32)
+    model.add(MaxPooling2D(pool_size=(2, 2), padding='same'))  # shape(batch_size, 32, 32, 32)
+    ###########
+    model.add(Conv2D(512, (2, 2), padding='same', activation='relu', kernel_regularizer=regularizers.l2(0.001)))  # shape(batch_size, 64, 64, 32)
+    model.add(MaxPooling2D(pool_size=(2, 2), padding='same'))  # shape(batch_size, 32, 32, 32)
+    model.add(Conv2D(512, (2, 2), padding='same', activation='relu', kernel_regularizer=regularizers.l2(0.001)))  # shape(batch_size, 64, 64, 32)
+    model.add(MaxPooling2D(pool_size=(2, 2), padding='same'))  # shape(batch_size, 32, 32, 32)
+    ########### 0.50,0.25
+    model.add(Dropout(0.00))
+    model.add(Flatten())
+    ###########
+    model.add(Dense(512))
+    model.add(Dense(512))
+    ##########
+    model.add(Dense(256))
+    model.add(Dense(128))
+    model.add(Dense(len(no_imgs)))
+    model.add(Activation('softmax'))
+    return model
+
+def train():
+    no_imgs, list_fams = num_img_fams_list() #a list storing num of images for each family
+    print(no_imgs)
+    total = sum(no_imgs) # total number of all samples
+    print(total)
+    X = getX(list_fams, total)
+    y = getlabels(no_imgs, total)
+
+    p = np.arange(total)  # an index array, 0:n_samples
+    random.seed(random.random())
+    random.shuffle(p)  # the index array is now shuffled
+    X, y = X[p], y[p]  # both the arrays are now shuffled
+    #print("y.shape", y.shape)
+    kfold = 10# no. of folds (better to have this at the start of the code)
+    skfind = strtifiedkfolddata(X, y, total, kfold)
+    cvscores = []
+    conf_mat = np.zeros((len(no_imgs), len(no_imgs)))  # Inimaltializing the Confusion Matrix
+    for i in range(kfold):
+        print("***********************************************************************************************")
+        print(f"Running epoch {i} of k-fold {kfold}:\n")
+        train_indices = skfind[i][0]
+        #print("train_indices", train_indices[100:200])
+        test_indices = skfind[i][1]
+        #print(test_indices[100:200])
+        X_train = X[train_indices]
+        X_train = X_train.reshape((-1, 64, 64, 1)).astype(float)
+        #print("X_train.shape", X_train.shape)
+        y_train = y[train_indices]
+        #print(y_train[100:200])
+        y_train = keras.utils.to_categorical(y_train, num_classes=len(no_imgs))
+        #print("y_train.shape", y_train.shape)
+        X_test = X[test_indices].reshape((-1, 64, 64, 1)).astype(float)
+        y_test = y[test_indices]
+        # print(y_test[100:200])
+        y_test_onehot = keras.utils.to_categorical(y_test, num_classes=len(no_imgs))
+        model = model_cnn(no_imgs)
+        opt = SGD(learning_rate=0.001, momentum=0.2)
+        # opt = keras.optimizers.Adam(learning_rate=0.001)
+        # Compile model
+        # model.compile(optimizer=opt, loss=losses.logcosh, metrics=['accuracy'])
+        model.compile(optimizer=opt, loss=losses.CategoricalCrossentropy(), metrics=['accuracy'])
+# loss=tf.keras.losses.SparseCategoricalCrossentropy()
+
+
+        # Fit the model
+        model.fit(X_train, y_train, epochs=20, batch_size=1, validation_split=0.1, verbose=1)
+        # evaluate the model
+        scores = model.evaluate(X_test, y_test_onehot, verbose=1)
+        print("%s: %.4f%%" % (model.metrics_names[1], scores[1] * 100))
+        cvscores.append(scores[1] * 100)
+
+        avg_acc = np.mean(cvscores)
+        print("avg_acc:", avg_acc)
+        print("Saving MOdel:\n")
+        save_path = 'D:\Malware Paper\Malware\\trained_model\models_fold_{}'.format(i)
+        if not os.path.exists(save_path): # Create a new directory because it does not exist
+            os.makedirs(save_path)
+        model.save('{}\model_acc_{}.h5'.format(save_path,avg_acc))
+        print("Model saved...!!!! \n")
+        # Testing
+        tic = time.time()
+        y_predict = model.predict(X_test)  # output is labels and not indices
+        toc = time.time()
+        print("testing time = ", toc - tic)  # roughly 0.3 secs
+        y_predict = np.argmax(y_predict,  axis=1)
+        print(y_predict[0:100])
+        print(y_test[0:100])
+        # Compute confusion matrixnp.array([label.index(max(label)) for label in y_predict.tolist()])
+        print('Confusion Matrix')
+        print(confusion_matrix(y_test, y_predict))
+        print('Classification Report')
+        print(classification_report(y_test, y_predict, target_names=list_fams))
+        #cm = confusion_matrix(y_test, y_predict)
+        #conf_mat = conf_mat + cm
+    #conf_mat_norm = conf_mat / no_imgs
+    #conf_mat2 = np.around(conf_mat_norm, decimals=2)  # rounding to display in figure
+
+if __name__ == "__main__":
+          train()
